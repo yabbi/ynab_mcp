@@ -975,6 +975,66 @@ ${transaction.memo ? `Memo: ${transaction.memo}` : ""}`,
   }
 );
 
+server.tool(
+  "reconcile_account",
+  "Reconcile an account: marks all cleared transactions as reconciled, and optionally creates a balance adjustment if the real-world balance differs from the cleared balance.",
+  {
+    account: z.string().describe("Account name (fuzzy matched)"),
+    balance: z.number().optional().describe("The real-world account balance in dollars. If provided and it differs from the cleared balance, a 'Reconciliation Balance Adjustment' transaction is created."),
+  },
+  async ({ account, balance }) => {
+    // Resolve account
+    const accountResult = await client.findAccount(account);
+    if ("error" in accountResult) {
+      return { content: [{ type: "text" as const, text: accountResult.error }], isError: true };
+    }
+
+    // Fetch all transactions for this account
+    const allTransactions = await client.getTransactions({ accountId: accountResult.id, sinceDate: "1900-01-01" });
+
+    // Filter to only cleared (not uncleared, not already reconciled)
+    const clearedTransactions = allTransactions.filter(t => t.cleared === "cleared");
+
+    // Mark each cleared transaction as reconciled
+    let reconciledCount = 0;
+    for (const t of clearedTransactions) {
+      await client.updateTransaction(t.id, { cleared: "reconciled" });
+      reconciledCount++;
+    }
+
+    // Handle balance adjustment if needed
+    let adjustmentInfo = "";
+    if (balance !== undefined) {
+      const targetMilliunits = usdToMilliunits(balance);
+      const clearedBalance = accountResult.cleared_balance;
+
+      if (targetMilliunits !== clearedBalance) {
+        const adjustmentAmount = targetMilliunits - clearedBalance;
+        const today = new Date().toISOString().split("T")[0];
+
+        await client.createTransaction({
+          account_id: accountResult.id,
+          date: today,
+          amount: adjustmentAmount,
+          payee_name: "Reconciliation Balance Adjustment",
+          cleared: "reconciled",
+        });
+
+        adjustmentInfo = `\nBalance adjustment: ${formatUSD(adjustmentAmount)} (cleared balance was ${formatUSD(clearedBalance)}, target ${formatUSD(targetMilliunits)})`;
+      } else {
+        adjustmentInfo = "\nNo balance adjustment needed - cleared balance matches.";
+      }
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: `Reconciled account: ${accountResult.name}\nTransactions reconciled: ${reconciledCount}${adjustmentInfo}`,
+      }],
+    };
+  }
+);
+
 // =============================================================================
 // Delete Tool
 // =============================================================================
