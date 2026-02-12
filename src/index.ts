@@ -108,12 +108,10 @@ class YNABClient {
   private token: string;
   private budgetId: string | null = null;
 
-  // Cache
-  private accounts: YNABAccount[] = [];
-  private categories: YNABCategory[] = [];
-  private categoryGroups: YNABCategoryGroup[] = [];
+  // Cache - only for name resolution (IDs), not balances
   private payees: YNABPayee[] = [];
   private cacheInitialized = false;
+  private lastCacheRefresh: Date | null = null;
 
   constructor(token: string, budgetId?: string) {
     this.token = token;
@@ -159,57 +157,68 @@ class YNABClient {
   }
 
   async refreshCache(): Promise<void> {
-    const [accountsRes, categoriesRes, payeesRes] = await Promise.all([
-      this.request<{ data: { accounts: YNABAccount[] } }>(`/budgets/${this.budgetId}/accounts`),
-      this.request<{ data: { category_groups: YNABCategoryGroup[] } }>(`/budgets/${this.budgetId}/categories`),
-      this.request<{ data: { payees: YNABPayee[] } }>(`/budgets/${this.budgetId}/payees`),
-    ]);
-
-    this.accounts = accountsRes.data.accounts.filter(a => !a.closed);
-    this.categoryGroups = categoriesRes.data.category_groups.filter(g => !g.hidden);
-    this.categories = this.categoryGroups.flatMap(g =>
-      g.categories.filter(c => !c.hidden).map(c => ({ ...c, category_group_name: g.name }))
-    );
+    // Only cache payees for name resolution - they rarely change
+    // Accounts and categories are fetched fresh each time to get current balances
+    const payeesRes = await this.request<{ data: { payees: YNABPayee[] } }>(`/budgets/${this.budgetId}/payees`);
     this.payees = payeesRes.data.payees;
     this.cacheInitialized = true;
+    this.lastCacheRefresh = new Date();
+  }
+
+  // Fetch fresh account data (not cached - balances change frequently)
+  async getAccountsFresh(): Promise<YNABAccount[]> {
+    const { data } = await this.request<{ data: { accounts: YNABAccount[] } }>(`/budgets/${this.budgetId}/accounts`);
+    return data.accounts.filter(a => !a.closed);
+  }
+
+  // Fetch fresh category data (not cached - balances change frequently)
+  async getCategoriesFresh(): Promise<{ groups: YNABCategoryGroup[]; categories: YNABCategory[] }> {
+    const { data } = await this.request<{ data: { category_groups: YNABCategoryGroup[] } }>(`/budgets/${this.budgetId}/categories`);
+    const groups = data.category_groups.filter(g => !g.hidden);
+    const categories = groups.flatMap(g =>
+      g.categories.filter(c => !c.hidden).map(c => ({ ...c, category_group_name: g.name }))
+    );
+    return { groups, categories };
   }
 
   // =============================================================================
-  // Name Resolution with Fuzzy Matching
+  // Name Resolution with Fuzzy Matching (fetches fresh data)
   // =============================================================================
 
-  findAccount(query: string): YNABAccount | { matches: YNABAccount[]; error: string } {
+  async findAccount(query: string): Promise<YNABAccount | { matches: YNABAccount[]; error: string }> {
+    const accounts = await this.getAccountsFresh();
     const q = query.toLowerCase();
 
     // Exact match
-    const exact = this.accounts.find(a => a.name.toLowerCase() === q);
+    const exact = accounts.find(a => a.name.toLowerCase() === q);
     if (exact) return exact;
 
     // Contains match
-    const contains = this.accounts.filter(a => a.name.toLowerCase().includes(q));
+    const contains = accounts.filter(a => a.name.toLowerCase().includes(q));
     if (contains.length === 1) return contains[0];
     if (contains.length > 1) {
       return { matches: contains, error: `Multiple accounts match "${query}": ${contains.map(a => a.name).join(", ")}` };
     }
 
-    return { matches: [], error: `No account found matching "${query}". Available: ${this.accounts.map(a => a.name).join(", ")}` };
+    return { matches: [], error: `No account found matching "${query}". Available: ${accounts.map(a => a.name).join(", ")}` };
   }
 
-  findCategory(query: string): YNABCategory | { matches: YNABCategory[]; error: string } {
+  async findCategory(query: string): Promise<YNABCategory | { matches: YNABCategory[]; error: string }> {
+    const { categories } = await this.getCategoriesFresh();
     const q = query.toLowerCase();
 
     // Exact match
-    const exact = this.categories.find(c => c.name.toLowerCase() === q);
+    const exact = categories.find(c => c.name.toLowerCase() === q);
     if (exact) return exact;
 
     // Contains match
-    const contains = this.categories.filter(c => c.name.toLowerCase().includes(q));
+    const contains = categories.filter(c => c.name.toLowerCase().includes(q));
     if (contains.length === 1) return contains[0];
     if (contains.length > 1) {
       return { matches: contains, error: `Multiple categories match "${query}": ${contains.map(c => `${c.category_group_name}: ${c.name}`).join(", ")}` };
     }
 
-    return { matches: [], error: `No category found matching "${query}". Try one of: ${this.categories.slice(0, 10).map(c => c.name).join(", ")}...` };
+    return { matches: [], error: `No category found matching "${query}". Try one of: ${categories.slice(0, 10).map(c => c.name).join(", ")}...` };
   }
 
   findPayee(query: string): YNABPayee | { matches: YNABPayee[]; isNew: boolean; error?: string } {
@@ -237,18 +246,6 @@ class YNABClient {
     return { matches: [], isNew: true };
   }
 
-  getAccounts(): YNABAccount[] {
-    return this.accounts;
-  }
-
-  getCategories(): YNABCategory[] {
-    return this.categories;
-  }
-
-  getCategoryGroups(): YNABCategoryGroup[] {
-    return this.categoryGroups;
-  }
-
   getPayees(): YNABPayee[] {
     return this.payees;
   }
@@ -258,15 +255,16 @@ class YNABClient {
   // =============================================================================
 
   async getBudgetSummary(): Promise<{ budget: YNABBudget; month: YNABMonth; accounts: YNABAccount[] }> {
-    const [budgetRes, monthRes] = await Promise.all([
+    const [budgetRes, monthRes, accounts] = await Promise.all([
       this.request<{ data: { budget: YNABBudget } }>(`/budgets/${this.budgetId}`),
       this.request<{ data: { month: YNABMonth } }>(`/budgets/${this.budgetId}/months/current`),
+      this.getAccountsFresh(),
     ]);
 
     return {
       budget: budgetRes.data.budget,
       month: monthRes.data.month,
-      accounts: this.accounts,
+      accounts,
     };
   }
 
@@ -466,7 +464,7 @@ server.tool(
   "List all your YNAB accounts with their current balances",
   {},
   async () => {
-    const accounts = client.getAccounts();
+    const accounts = await client.getAccountsFresh();
 
     const list = accounts
       .map(a => `${a.name} (${a.type}): ${formatUSD(a.balance)} (cleared: ${formatUSD(a.cleared_balance)}, uncleared: ${formatUSD(a.uncleared_balance)})`)
@@ -483,7 +481,7 @@ server.tool(
   "List all budget categories with their budgeted, spent, and available amounts",
   {},
   async () => {
-    const groups = client.getCategoryGroups();
+    const { groups } = await client.getCategoriesFresh();
 
     const output = groups.map(g => {
       const cats = g.categories
@@ -506,7 +504,7 @@ server.tool(
     name: z.string().describe("Category name to look up (e.g., 'Groceries', 'Rent')"),
   },
   async ({ name }) => {
-    const result = client.findCategory(name);
+    const result = await client.findCategory(name);
 
     if ("error" in result) {
       return {
@@ -551,17 +549,17 @@ server.tool(
     }
 
     if (account) {
-      const result = client.findAccount(account);
+      const result = await client.findAccount(account);
       if ("error" in result) {
-        return { content: [{ type: "text", text: result.error }], isError: true };
+        return { content: [{ type: "text" as const, text: result.error }], isError: true };
       }
       options.accountId = result.id;
     }
 
     if (category) {
-      const result = client.findCategory(category);
+      const result = await client.findCategory(category);
       if ("error" in result) {
-        return { content: [{ type: "text", text: result.error }], isError: true };
+        return { content: [{ type: "text" as const, text: result.error }], isError: true };
       }
       options.categoryId = result.id;
     }
@@ -655,15 +653,15 @@ server.tool(
     // Resolve account
     let accountId: string;
     if (account) {
-      const result = client.findAccount(account);
+      const result = await client.findAccount(account);
       if ("error" in result) {
-        return { content: [{ type: "text", text: result.error }], isError: true };
+        return { content: [{ type: "text" as const, text: result.error }], isError: true };
       }
       accountId = result.id;
     } else {
-      const accounts = client.getAccounts();
+      const accounts = await client.getAccountsFresh();
       if (accounts.length === 0) {
-        return { content: [{ type: "text", text: "No accounts found in your budget" }], isError: true };
+        return { content: [{ type: "text" as const, text: "No accounts found in your budget" }], isError: true };
       }
       accountId = accounts[0].id;
     }
@@ -680,7 +678,7 @@ server.tool(
       // Multiple matches - ask for clarification
       return {
         content: [{
-          type: "text",
+          type: "text" as const,
           text: `Multiple payees match "${payee}":\n${payeeResult.matches.map(p => `  - ${p.name}`).join("\n")}\n\nPlease specify which payee you mean, or use the exact name.`,
         }],
         isError: true,
@@ -690,7 +688,7 @@ server.tool(
       if (!confirm_new_payee) {
         return {
           content: [{
-            type: "text",
+            type: "text" as const,
             text: `"${payee}" is a new payee that doesn't exist in your budget yet. To create this transaction with a new payee, set confirm_new_payee to true.`,
           }],
           isError: true,
@@ -702,9 +700,9 @@ server.tool(
     // Resolve category
     let categoryId: string | undefined;
     if (category) {
-      const result = client.findCategory(category);
+      const result = await client.findCategory(category);
       if ("error" in result) {
-        return { content: [{ type: "text", text: result.error }], isError: true };
+        return { content: [{ type: "text" as const, text: result.error }], isError: true };
       }
       categoryId = result.id;
     }
@@ -757,13 +755,13 @@ server.tool(
     // Resolve account
     let accountId: string;
     if (account) {
-      const result = client.findAccount(account);
+      const result = await client.findAccount(account);
       if ("error" in result) {
-        return { content: [{ type: "text", text: result.error }], isError: true };
+        return { content: [{ type: "text" as const, text: result.error }], isError: true };
       }
       accountId = result.id;
     } else {
-      const accounts = client.getAccounts();
+      const accounts = await client.getAccountsFresh();
       accountId = accounts[0].id;
     }
 
@@ -777,7 +775,7 @@ server.tool(
     } else if (payeeResult.matches.length > 0) {
       return {
         content: [{
-          type: "text",
+          type: "text" as const,
           text: `Multiple payees match "${payee}":\n${payeeResult.matches.map(p => `  - ${p.name}`).join("\n")}\n\nPlease specify which payee you mean.`,
         }],
         isError: true,
@@ -785,7 +783,7 @@ server.tool(
     } else if (payeeResult.isNew && !confirm_new_payee) {
       return {
         content: [{
-          type: "text",
+          type: "text" as const,
           text: `"${payee}" is a new payee. Set confirm_new_payee to true to create it.`,
         }],
         isError: true,
@@ -797,9 +795,9 @@ server.tool(
     // Resolve category
     let categoryId: string | undefined;
     if (category) {
-      const result = client.findCategory(category);
+      const result = await client.findCategory(category);
       if ("error" in result) {
-        return { content: [{ type: "text", text: result.error }], isError: true };
+        return { content: [{ type: "text" as const, text: result.error }], isError: true };
       }
       categoryId = result.id;
     }
