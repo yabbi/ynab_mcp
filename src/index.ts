@@ -29,6 +29,16 @@ interface YNABCategory {
   goal_type: string | null;
   goal_target: number | null;
   goal_percentage_complete: number | null;
+  goal_needs_whole_amount: boolean | null;
+  goal_day: number | null;
+  goal_cadence: number | null;
+  goal_cadence_frequency: number | null;
+  goal_creation_month: string | null;
+  goal_target_month: string | null;
+  goal_months_to_budget: number | null;
+  goal_under_funded: number | null;
+  goal_overall_funded: number | null;
+  goal_overall_left: number | null;
 }
 
 interface YNABCategoryGroup {
@@ -521,8 +531,14 @@ Available: ${formatUSD(c.balance)}`;
 
     if (c.goal_type) {
       output += `\n\nGoal: ${c.goal_type}`;
-      if (c.goal_target) output += ` - Target: ${formatUSD(c.goal_target)}`;
-      if (c.goal_percentage_complete !== null) output += ` (${c.goal_percentage_complete}% complete)`;
+      if (c.goal_target) output += `\n  Target: ${formatUSD(c.goal_target)}`;
+      if (c.goal_target_month) output += `\n  Target Month: ${c.goal_target_month}`;
+      if (c.goal_percentage_complete !== null) output += `\n  Progress: ${c.goal_percentage_complete}% complete`;
+      if (c.goal_overall_funded !== null) output += `\n  Funded: ${formatUSD(c.goal_overall_funded)}`;
+      if (c.goal_overall_left !== null) output += `\n  Remaining: ${formatUSD(c.goal_overall_left)}`;
+      if (c.goal_under_funded !== null && c.goal_under_funded !== 0) output += `\n  Under-funded: ${formatUSD(c.goal_under_funded)}`;
+      if (c.goal_months_to_budget !== null) output += `\n  Months to Budget: ${c.goal_months_to_budget}`;
+      if (c.goal_creation_month) output += `\n  Created: ${c.goal_creation_month}`;
     }
 
     return {
@@ -584,7 +600,8 @@ server.tool(
     const list = limited.map(t => {
       const amount = formatUSD(t.amount);
       const type = t.amount < 0 ? "outflow" : "inflow";
-      return `${t.date} | ${amount} (${type}) | ${t.payee_name || "No payee"} | ${t.category_name || "Uncategorized"} | ${t.account_name}${t.memo ? ` | "${t.memo}"` : ""}`;
+      const approvalStatus = t.approved ? "approved" : "pending";
+      return `${t.date} | ${amount} (${type}) | ${t.cleared} | ${approvalStatus} | ${t.payee_name || "No payee"} | ${t.category_name || "Uncategorized"} | ${t.account_name}${t.memo ? ` | "${t.memo}"` : ""}`;
     }).join("\n");
 
     return {
