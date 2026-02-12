@@ -659,7 +659,7 @@ server.tool(
       const amount = formatUSD(t.amount);
       const type = t.amount < 0 ? "outflow" : "inflow";
       const approvalStatus = t.approved ? "approved" : "pending";
-      return `${t.date} | ${amount} (${type}) | ${t.cleared} | ${approvalStatus} | ${t.payee_name || "No payee"} | ${t.category_name || "Uncategorized"} | ${t.account_name}${t.memo ? ` | "${t.memo}"` : ""}`;
+      return `[${t.id}] ${t.date} | ${amount} (${type}) | ${t.cleared} | ${approvalStatus} | ${t.payee_name || "No payee"} | ${t.category_name || "Uncategorized"} | ${t.account_name}${t.memo ? ` | "${t.memo}"` : ""}`;
     }).join("\n");
 
     return {
