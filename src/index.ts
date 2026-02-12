@@ -288,6 +288,7 @@ class YNABClient {
     accountId?: string;
     categoryId?: string;
     payeeId?: string;
+    limit?: number;
   } = {}): Promise<YNABTransaction[]> {
     let endpoint = `/budgets/${this.budgetId}/transactions`;
 
@@ -299,6 +300,38 @@ class YNABClient {
       endpoint = `/budgets/${this.budgetId}/payees/${options.payeeId}/transactions`;
     }
 
+    const limit = options.limit ?? 20;
+
+    // YNAB API returns transactions in ascending date order with no sort option.
+    // When no since_date is provided, use an expanding window strategy to fetch
+    // only recent transactions instead of the entire history.
+    if (!options.sinceDate) {
+      const windowDays = [30, 90, 180, 365];
+      for (const days of windowDays) {
+        const since = new Date();
+        since.setDate(since.getDate() - days);
+        const sinceStr = since.toISOString().split("T")[0];
+
+        const params = new URLSearchParams();
+        params.set("since_date", sinceStr);
+        const query = params.toString();
+
+        const { data } = await this.request<{ data: { transactions: YNABTransaction[] } }>(
+          `${endpoint}?${query}`
+        );
+
+        if (data.transactions.length >= limit) {
+          // Sort descending (most recent first) and return
+          return data.transactions.sort((a, b) => b.date.localeCompare(a.date));
+        }
+
+        // If the smallest window already returned fewer than limit,
+        // and we haven't exhausted all windows, keep expanding
+      }
+
+      // Fallback: fetch all transactions (no since_date filter)
+    }
+
     const params = new URLSearchParams();
     if (options.sinceDate) params.set("since_date", options.sinceDate);
 
@@ -307,7 +340,8 @@ class YNABClient {
       `${endpoint}${query ? `?${query}` : ""}`
     );
 
-    return data.transactions;
+    // Sort descending (most recent first)
+    return data.transactions.sort((a, b) => b.date.localeCompare(a.date));
   }
 
   async getScheduledTransactions(): Promise<YNABScheduledTransaction[]> {
@@ -361,6 +395,30 @@ class YNABClient {
       }
     );
     return data.scheduled_transaction;
+  }
+
+  async updateTransaction(transactionId: string, updates: {
+    amount?: number;
+    date?: string;
+    payee_name?: string;
+    payee_id?: string;
+    category_id?: string;
+    memo?: string;
+    cleared?: string;
+  }): Promise<YNABTransaction> {
+    const { data } = await this.request<{ data: { transaction: YNABTransaction } }>(
+      `/budgets/${this.budgetId}/transactions/${transactionId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ transaction: updates }),
+      }
+    );
+
+    if (updates.payee_name && !updates.payee_id) {
+      await this.refreshCache();
+    }
+
+    return data.transaction;
   }
 
   async deleteTransaction(transactionId: string): Promise<void> {
@@ -549,7 +607,7 @@ Available: ${formatUSD(c.balance)}`;
 
 server.tool(
   "get_transactions",
-  "Get recent transactions, optionally filtered by account, category, payee, or date",
+  "Get transactions sorted by most recent first, optionally filtered by account, category, payee, or date",
   {
     since_date: z.string().optional().describe("Only show transactions on or after this date (e.g., 'today', 'yesterday', '2024-01-01')"),
     account: z.string().optional().describe("Filter by account name"),
@@ -590,7 +648,7 @@ server.tool(
       // If no matches, we'll just return all transactions (payee doesn't exist)
     }
 
-    const transactions = await client.getTransactions(options);
+    const transactions = await client.getTransactions({ ...options, limit });
     const limited = transactions.slice(0, limit);
 
     if (limited.length === 0) {
@@ -841,6 +899,77 @@ Amount: ${formatUSD(transaction.amount)}
 Payee: ${transaction.payee_name}
 Category: ${transaction.category_name || "Uncategorized"}
 Account: ${transaction.account_name}`,
+      }],
+    };
+  }
+);
+
+// =============================================================================
+// Update Tool
+// =============================================================================
+
+server.tool(
+  "update_transaction",
+  "Update an existing transaction. Can change cleared status, amount, payee, category, date, or memo.",
+  {
+    transaction_id: z.string().describe("The transaction ID to update. Get this from get_transactions"),
+    cleared: z.enum(["cleared", "uncleared", "reconciled"]).optional().describe("Set the cleared status"),
+    amount: z.number().optional().describe("New amount in dollars. Negative for outflows, positive for inflows"),
+    payee: z.string().optional().describe("New payee name (fuzzy matched)"),
+    category: z.string().optional().describe("New category name (fuzzy matched)"),
+    date: z.string().optional().describe("New date ('today', 'yesterday', or YYYY-MM-DD)"),
+    memo: z.string().optional().describe("New memo/note"),
+  },
+  async ({ transaction_id, cleared, amount, payee, category, date, memo }) => {
+    const updates: Parameters<typeof client.updateTransaction>[1] = {};
+
+    if (cleared) updates.cleared = cleared;
+    if (amount !== undefined) updates.amount = usdToMilliunits(amount);
+    if (date) updates.date = parseDate(date);
+    if (memo !== undefined) updates.memo = memo;
+
+    if (payee) {
+      const result = client.findPayee(payee);
+      if ("id" in result) {
+        updates.payee_id = result.id;
+      } else if (result.matches.length > 0) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Multiple payees match "${payee}":\n${result.matches.map(p => `  - ${p.name}`).join("\n")}\n\nPlease specify which payee you mean.`,
+          }],
+          isError: true,
+        };
+      } else {
+        updates.payee_name = payee;
+      }
+    }
+
+    if (category) {
+      const result = await client.findCategory(category);
+      if ("error" in result) {
+        return { content: [{ type: "text" as const, text: result.error }], isError: true };
+      }
+      updates.category_id = result.id;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return { content: [{ type: "text", text: "No updates specified." }], isError: true };
+    }
+
+    const transaction = await client.updateTransaction(transaction_id, updates);
+
+    return {
+      content: [{
+        type: "text",
+        text: `Transaction updated:
+Date: ${transaction.date}
+Amount: ${formatUSD(transaction.amount)}
+Payee: ${transaction.payee_name}
+Category: ${transaction.category_name || "Uncategorized"}
+Account: ${transaction.account_name}
+Cleared: ${transaction.cleared}
+${transaction.memo ? `Memo: ${transaction.memo}` : ""}`,
       }],
     };
   }
