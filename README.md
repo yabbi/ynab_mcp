@@ -4,12 +4,14 @@ An MCP (Model Context Protocol) server that enables AI assistants to interact wi
 
 ## Features
 
-- **Read your budget**: View budget summary, accounts, categories, transactions, payees
-- **Create transactions**: Add new transactions with smart payee matching
-- **Create scheduled transactions**: Set up recurring transactions
-- **Delete transactions**: Remove transactions (with confirmation)
+- **Read your budget**: View budget summary, accounts, categories, transactions, payees, scheduled transactions
+- **Manage transactions**: Create, update, and delete transactions with split transaction support
+- **Budgeting**: Set category budgets, update categories, view month-by-month breakdowns
+- **Account management**: Create accounts, view details, reconcile balances
+- **Scheduled transactions**: Create and view recurring transactions
+- **Payee management**: View and rename payees
 - **Human-friendly inputs**: Use category/account/payee names (not IDs), dollar amounts, flexible dates
-- **Transaction status**: Shows cleared/uncleared/reconciled and approval status
+- **Smart payee matching**: Fuzzy matches existing payees with confirmation for new ones
 - **Full goal details**: View all goal information including targets, progress, and funding status
 
 ## Setup
@@ -80,30 +82,64 @@ Replace `/path/to/ynab-mcp` with the actual path to this directory.
 
 ## Available Tools
 
-### Read Tools
+### Discovery
+
+| Tool | Description |
+|------|-------------|
+| `search_tools` | Search available YNAB tools by keyword or category (budget, accounts, categories, transactions, scheduled, payees) |
+
+### Budget
 
 | Tool | Description |
 |------|-------------|
 | `get_budget_summary` | Overview: ready to assign, budgeted, activity, account balances |
+| `get_monthly_budget` | Budget summary for a specific month |
+| `get_budget_months` | List all budget months with budgeted, activity, and to-be-budgeted amounts |
+
+### Accounts
+
+| Tool | Description |
+|------|-------------|
 | `get_accounts` | List all accounts with balances (cleared/uncleared) |
+| `get_account` | Detailed info for a single account by name |
+| `create_account` | Create a new account (checking, savings, credit card, etc.) |
+| `reconcile_account` | Reconcile an account with optional balance adjustment |
+
+### Categories
+
+| Tool | Description |
+|------|-------------|
 | `get_categories` | All categories with budgeted/spent/available amounts |
 | `get_category` | Details for a specific category including full goal information |
-| `get_transactions` | Recent transactions with cleared/approved status and optional filters |
-| `get_payees` | List all payees |
-| `get_monthly_budget` | Budget summary for a specific month |
+| `get_month_category` | Category details for a specific month (budgeted, activity, balance, goals) |
+| `set_category_budget` | Set the budgeted amount for a category in a specific month |
+| `update_category` | Update a category's name, note, or goal target |
 
-### Write Tools
+### Transactions
 
 | Tool | Description |
 |------|-------------|
-| `create_transaction` | Add a new transaction with smart payee matching |
+| `get_transactions` | Recent transactions with filters (account, category, payee, date) |
+| `get_transaction` | Get a single transaction by ID |
+| `get_month_transactions` | All transactions for a specific budget month |
+| `create_transaction` | Add a new transaction with smart payee matching and split support |
+| `update_transaction` | Update an existing transaction (amount, payee, category, cleared status, etc.) |
+| `delete_transaction` | Permanently delete a transaction by ID |
+
+### Scheduled Transactions
+
+| Tool | Description |
+|------|-------------|
+| `get_scheduled_transactions` | List all scheduled (recurring) transactions |
 | `create_scheduled_transaction` | Create a recurring transaction |
 
-### Delete Tools
+### Payees
 
 | Tool | Description |
 |------|-------------|
-| `delete_transaction` | Permanently delete a transaction by ID |
+| `get_payees` | List all payees |
+| `get_payee` | Get details for a single payee by name |
+| `update_payee` | Rename a payee |
 
 ## Data Shown
 
@@ -138,8 +174,20 @@ When a category has a goal, you'll see:
 **Add a transaction:**
 > "I spent $45 at Whole Foods for groceries"
 
+**Split transaction:**
+> "I spent $100 at Costco — $60 on groceries and $40 on household supplies"
+
+**Update a transaction:**
+> "Mark my last Whole Foods transaction as cleared"
+
+**Set a category budget:**
+> "Budget $500 for groceries this month"
+
 **Check account balances:**
 > "What are my account balances?"
+
+**Reconcile an account:**
+> "Reconcile my checking account to $1,234.56"
 
 **View category goal progress:**
 > "How am I doing on my vacation savings goal?"
