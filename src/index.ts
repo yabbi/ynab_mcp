@@ -360,6 +360,7 @@ class YNABClient {
     category_id?: string;
     memo?: string;
     cleared?: string;
+    subtransactions?: { amount: number; payee_id?: string; payee_name?: string; category_id?: string; memo?: string }[];
   }): Promise<YNABTransaction> {
     const { data } = await this.request<{ data: { transaction: YNABTransaction } }>(
       `/budgets/${this.budgetId}/transactions`,
@@ -425,6 +426,96 @@ class YNABClient {
     await this.request(`/budgets/${this.budgetId}/transactions/${transactionId}`, {
       method: "DELETE",
     });
+  }
+
+  async getMonths(): Promise<YNABMonth[]> {
+    const { data } = await this.request<{ data: { months: YNABMonth[] } }>(`/budgets/${this.budgetId}/months`);
+    return data.months;
+  }
+
+  async getMonthCategory(month: string, categoryId: string): Promise<YNABCategory> {
+    const { data } = await this.request<{ data: { category: YNABCategory } }>(
+      `/budgets/${this.budgetId}/months/${month}/categories/${categoryId}`
+    );
+    return data.category;
+  }
+
+  async updateMonthCategoryBudget(month: string, categoryId: string, budgeted: number): Promise<YNABCategory> {
+    const { data } = await this.request<{ data: { category: YNABCategory } }>(
+      `/budgets/${this.budgetId}/months/${month}/categories/${categoryId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ category: { budgeted } }),
+      }
+    );
+    return data.category;
+  }
+
+  async updateCategory(categoryId: string, updates: { name?: string; note?: string; category_group_id?: string; goal_target?: number }): Promise<YNABCategory> {
+    const { data } = await this.request<{ data: { category: YNABCategory } }>(
+      `/budgets/${this.budgetId}/categories/${categoryId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ category: updates }),
+      }
+    );
+    return data.category;
+  }
+
+  async getMonthTransactions(month: string, sinceDate?: string, type?: string): Promise<YNABTransaction[]> {
+    const params = new URLSearchParams();
+    if (sinceDate) params.set("since_date", sinceDate);
+    if (type) params.set("type", type);
+    const query = params.toString();
+    const { data } = await this.request<{ data: { transactions: YNABTransaction[] } }>(
+      `/budgets/${this.budgetId}/months/${month}/transactions${query ? `?${query}` : ""}`
+    );
+    return data.transactions.sort((a, b) => b.date.localeCompare(a.date));
+  }
+
+  async createAccount(name: string, type: string, balance: number): Promise<YNABAccount> {
+    const { data } = await this.request<{ data: { account: YNABAccount } }>(
+      `/budgets/${this.budgetId}/accounts`,
+      {
+        method: "POST",
+        body: JSON.stringify({ account: { name, type, balance } }),
+      }
+    );
+    return data.account;
+  }
+
+  async getAccount(accountId: string): Promise<YNABAccount> {
+    const { data } = await this.request<{ data: { account: YNABAccount } }>(
+      `/budgets/${this.budgetId}/accounts/${accountId}`
+    );
+    return data.account;
+  }
+
+  async getTransaction(transactionId: string): Promise<YNABTransaction> {
+    const { data } = await this.request<{ data: { transaction: YNABTransaction } }>(
+      `/budgets/${this.budgetId}/transactions/${transactionId}`
+    );
+    return data.transaction;
+  }
+
+  async getPayee(payeeId: string): Promise<YNABPayee> {
+    const { data } = await this.request<{ data: { payee: YNABPayee } }>(
+      `/budgets/${this.budgetId}/payees/${payeeId}`
+    );
+    return data.payee;
+  }
+
+  async updatePayee(payeeId: string, name: string): Promise<YNABPayee> {
+    const { data } = await this.request<{ data: { payee: YNABPayee } }>(
+      `/budgets/${this.budgetId}/payees/${payeeId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ payee: { name } }),
+      }
+    );
+    // Refresh payee cache since name changed
+    await this.refreshCache();
+    return data.payee;
   }
 }
 
@@ -659,7 +750,13 @@ server.tool(
       const amount = formatUSD(t.amount);
       const type = t.amount < 0 ? "outflow" : "inflow";
       const approvalStatus = t.approved ? "approved" : "pending";
-      return `[${t.id}] ${t.date} | ${amount} (${type}) | ${t.cleared} | ${approvalStatus} | ${t.payee_name || "No payee"} | ${t.category_name || "Uncategorized"} | ${t.account_name}${t.memo ? ` | "${t.memo}"` : ""}`;
+      let line = `[${t.id}] ${t.date} | ${amount} (${type}) | ${t.cleared} | ${approvalStatus} | ${t.payee_name || "No payee"} | ${t.category_name || "Uncategorized"} | ${t.account_name}${t.memo ? ` | "${t.memo}"` : ""}`;
+      if (t.subtransactions && t.subtransactions.length > 0) {
+        for (const sub of t.subtransactions) {
+          line += `\n  -> ${formatUSD(sub.amount)} | ${sub.category_name || "Uncategorized"}${sub.payee_name ? ` | ${sub.payee_name}` : ""}${sub.memo ? ` | "${sub.memo}"` : ""}`;
+        }
+      }
+      return line;
     }).join("\n");
 
     return {
@@ -708,6 +805,319 @@ Age of Money: ${data.age_of_money ?? "N/A"} days`,
   }
 );
 
+server.tool(
+  "get_budget_months",
+  "List all budget months with their budgeted, activity, and to-be-budgeted amounts",
+  {},
+  async () => {
+    const months = await client.getMonths();
+
+    const list = months
+      .slice(0, 24)
+      .map(m => `${m.month}: Budgeted ${formatUSD(m.budgeted)} | Activity ${formatUSD(m.activity)} | To Be Budgeted ${formatUSD(m.to_be_budgeted)} | Income ${formatUSD(m.income)}`)
+      .join("\n");
+
+    return {
+      content: [{ type: "text", text: `Budget Months (up to 24):\n${list}` }],
+    };
+  }
+);
+
+server.tool(
+  "get_month_category",
+  "Get detailed category info for a specific month including budgeted, activity, balance, and goal details",
+  {
+    month: z.string().describe("Month in YYYY-MM-DD format (day is ignored) or 'current' for this month"),
+    category: z.string().describe("Category name (fuzzy matched)"),
+  },
+  async ({ month, category }) => {
+    const catResult = await client.findCategory(category);
+    if ("error" in catResult) {
+      return { content: [{ type: "text" as const, text: catResult.error }], isError: true };
+    }
+
+    const monthStr = month === "current" ? "current" : parseDate(month).slice(0, 7) + "-01";
+    const c = await client.getMonthCategory(monthStr, catResult.id);
+
+    let output = `Category: ${catResult.category_group_name}: ${c.name} (${monthStr})
+Budgeted: ${formatUSD(c.budgeted)}
+Activity: ${formatUSD(c.activity)}
+Balance: ${formatUSD(c.balance)}`;
+
+    if (c.goal_type) {
+      output += `\n\nGoal: ${c.goal_type}`;
+      if (c.goal_target) output += `\n  Target: ${formatUSD(c.goal_target)}`;
+      if (c.goal_target_month) output += `\n  Target Month: ${c.goal_target_month}`;
+      if (c.goal_percentage_complete !== null) output += `\n  Progress: ${c.goal_percentage_complete}% complete`;
+      if (c.goal_overall_funded !== null) output += `\n  Funded: ${formatUSD(c.goal_overall_funded)}`;
+      if (c.goal_overall_left !== null) output += `\n  Remaining: ${formatUSD(c.goal_overall_left)}`;
+      if (c.goal_under_funded !== null && c.goal_under_funded !== 0) output += `\n  Under-funded: ${formatUSD(c.goal_under_funded)}`;
+    }
+
+    return {
+      content: [{ type: "text", text: output }],
+    };
+  }
+);
+
+server.tool(
+  "set_category_budget",
+  "Set the budgeted amount for a category in a specific month. This is the core budgeting action.",
+  {
+    month: z.string().describe("Month in YYYY-MM-DD format (day is ignored) or 'current' for this month"),
+    category: z.string().describe("Category name (fuzzy matched)"),
+    amount: z.number().describe("Amount to budget in dollars (e.g., 500 for $500.00)"),
+  },
+  async ({ month, category, amount }) => {
+    const catResult = await client.findCategory(category);
+    if ("error" in catResult) {
+      return { content: [{ type: "text" as const, text: catResult.error }], isError: true };
+    }
+
+    const monthStr = month === "current" ? "current" : parseDate(month).slice(0, 7) + "-01";
+    const updated = await client.updateMonthCategoryBudget(monthStr, catResult.id, usdToMilliunits(amount));
+
+    return {
+      content: [{
+        type: "text",
+        text: `Budget updated: ${catResult.category_group_name}: ${updated.name} (${monthStr})
+Budgeted: ${formatUSD(updated.budgeted)}
+Activity: ${formatUSD(updated.activity)}
+Balance: ${formatUSD(updated.balance)}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "update_category",
+  "Update a category's name, note, or goal target",
+  {
+    category: z.string().describe("Category name (fuzzy matched)"),
+    name: z.string().optional().describe("New category name"),
+    note: z.string().optional().describe("New category note"),
+    goal_target: z.number().optional().describe("New goal target amount in dollars"),
+  },
+  async ({ category, name, note, goal_target }) => {
+    const catResult = await client.findCategory(category);
+    if ("error" in catResult) {
+      return { content: [{ type: "text" as const, text: catResult.error }], isError: true };
+    }
+
+    const updates: { name?: string; note?: string; goal_target?: number } = {};
+    if (name !== undefined) updates.name = name;
+    if (note !== undefined) updates.note = note;
+    if (goal_target !== undefined) updates.goal_target = usdToMilliunits(goal_target);
+
+    if (Object.keys(updates).length === 0) {
+      return { content: [{ type: "text", text: "No updates specified." }], isError: true };
+    }
+
+    const updated = await client.updateCategory(catResult.id, updates);
+
+    return {
+      content: [{
+        type: "text",
+        text: `Category updated: ${updated.name}
+Budgeted: ${formatUSD(updated.budgeted)}
+Activity: ${formatUSD(updated.activity)}
+Balance: ${formatUSD(updated.balance)}${updated.goal_target ? `\nGoal Target: ${formatUSD(updated.goal_target)}` : ""}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "get_transaction",
+  "Get a single transaction by its ID",
+  {
+    transaction_id: z.string().describe("The transaction ID"),
+  },
+  async ({ transaction_id }) => {
+    const t = await client.getTransaction(transaction_id);
+    const amount = formatUSD(t.amount);
+    const type = t.amount < 0 ? "outflow" : "inflow";
+    const approvalStatus = t.approved ? "approved" : "pending";
+
+    let output = `Transaction: ${t.id}
+Date: ${t.date}
+Amount: ${amount} (${type})
+Payee: ${t.payee_name || "No payee"}
+Category: ${t.category_name || "Uncategorized"}
+Account: ${t.account_name}
+Cleared: ${t.cleared}
+Status: ${approvalStatus}${t.memo ? `\nMemo: ${t.memo}` : ""}`;
+
+    if (t.subtransactions && t.subtransactions.length > 0) {
+      output += "\nSplit:";
+      for (const sub of t.subtransactions) {
+        output += `\n  -> ${formatUSD(sub.amount)} | ${sub.category_name || "Uncategorized"}${sub.payee_name ? ` | ${sub.payee_name}` : ""}${sub.memo ? ` | "${sub.memo}"` : ""}`;
+      }
+    }
+
+    return {
+      content: [{ type: "text", text: output }],
+    };
+  }
+);
+
+server.tool(
+  "get_month_transactions",
+  "Get all transactions for a specific budget month",
+  {
+    month: z.string().describe("Month in YYYY-MM-DD format (day is ignored) or 'current' for this month"),
+    since_date: z.string().optional().describe("Only show transactions on or after this date"),
+    type: z.enum(["uncategorized", "unapproved"]).optional().describe("Filter by type: 'uncategorized' or 'unapproved'"),
+  },
+  async ({ month, since_date, type }) => {
+    const monthStr = month === "current" ? "current" : parseDate(month).slice(0, 7) + "-01";
+    const sinceDate = since_date ? parseDate(since_date) : undefined;
+    const transactions = await client.getMonthTransactions(monthStr, sinceDate, type);
+
+    if (transactions.length === 0) {
+      return { content: [{ type: "text", text: "No transactions found for this month." }] };
+    }
+
+    const list = transactions.map(t => {
+      const amount = formatUSD(t.amount);
+      const txType = t.amount < 0 ? "outflow" : "inflow";
+      return `[${t.id}] ${t.date} | ${amount} (${txType}) | ${t.payee_name || "No payee"} | ${t.category_name || "Uncategorized"} | ${t.account_name}${t.memo ? ` | "${t.memo}"` : ""}`;
+    }).join("\n");
+
+    return {
+      content: [{ type: "text", text: `Transactions for ${monthStr} (${transactions.length}):\n${list}` }],
+    };
+  }
+);
+
+server.tool(
+  "get_account",
+  "Get detailed info for a single account by name",
+  {
+    name: z.string().describe("Account name (fuzzy matched)"),
+  },
+  async ({ name }) => {
+    const result = await client.findAccount(name);
+    if ("error" in result) {
+      return { content: [{ type: "text" as const, text: result.error }], isError: true };
+    }
+
+    const a = await client.getAccount(result.id);
+
+    return {
+      content: [{
+        type: "text",
+        text: `Account: ${a.name}
+Type: ${a.type}
+On Budget: ${a.on_budget}
+Balance: ${formatUSD(a.balance)}
+Cleared Balance: ${formatUSD(a.cleared_balance)}
+Uncleared Balance: ${formatUSD(a.uncleared_balance)}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "create_account",
+  "Create a new account in YNAB",
+  {
+    name: z.string().describe("Account name"),
+    type: z.enum(["checking", "savings", "cash", "creditCard", "lineOfCredit", "otherAsset", "otherLiability", "mortgage", "autoLoan", "studentLoan", "personalLoan", "medicalDebt", "otherDebt"]).describe("Account type"),
+    balance: z.number().describe("Starting balance in dollars (e.g., 1000 for $1,000.00). Use negative for debt accounts"),
+  },
+  async ({ name, type, balance }) => {
+    const a = await client.createAccount(name, type, usdToMilliunits(balance));
+
+    return {
+      content: [{
+        type: "text",
+        text: `Account created: ${a.name}
+Type: ${a.type}
+Balance: ${formatUSD(a.balance)}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "get_payee",
+  "Get details for a single payee by name",
+  {
+    name: z.string().describe("Payee name (fuzzy matched)"),
+  },
+  async ({ name }) => {
+    const result = client.findPayee(name);
+    if (!("id" in result)) {
+      if (result.matches.length > 0) {
+        return { content: [{ type: "text" as const, text: result.error! }], isError: true };
+      }
+      return { content: [{ type: "text" as const, text: `No payee found matching "${name}".` }], isError: true };
+    }
+
+    const p = await client.getPayee(result.id);
+
+    return {
+      content: [{
+        type: "text",
+        text: `Payee: ${p.name}
+ID: ${p.id}
+Transfer Account: ${p.transfer_account_id || "None"}`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "update_payee",
+  "Update a payee's name",
+  {
+    payee: z.string().describe("Current payee name (fuzzy matched)"),
+    name: z.string().describe("New payee name"),
+  },
+  async ({ payee, name }) => {
+    const result = client.findPayee(payee);
+    if (!("id" in result)) {
+      if (result.matches.length > 0) {
+        return { content: [{ type: "text" as const, text: result.error! }], isError: true };
+      }
+      return { content: [{ type: "text" as const, text: `No payee found matching "${payee}".` }], isError: true };
+    }
+
+    const updated = await client.updatePayee(result.id, name);
+
+    return {
+      content: [{
+        type: "text",
+        text: `Payee updated: ${updated.name} (was "${payee}")`,
+      }],
+    };
+  }
+);
+
+server.tool(
+  "get_scheduled_transactions",
+  "List all scheduled (recurring) transactions",
+  {},
+  async () => {
+    const transactions = await client.getScheduledTransactions();
+
+    if (transactions.length === 0) {
+      return { content: [{ type: "text", text: "No scheduled transactions found." }] };
+    }
+
+    const list = transactions.map(t => {
+      const amount = formatUSD(t.amount);
+      const type = t.amount < 0 ? "outflow" : "inflow";
+      return `${t.date_next} | ${t.frequency} | ${amount} (${type}) | ${t.payee_name || "No payee"} | ${t.category_name || "Uncategorized"} | ${t.account_name} | First: ${t.date_first}${t.memo ? ` | "${t.memo}"` : ""}`;
+    }).join("\n");
+
+    return {
+      content: [{ type: "text", text: `Scheduled Transactions (${transactions.length}):\n${list}` }],
+    };
+  }
+);
+
 // =============================================================================
 // Write Tools
 // =============================================================================
@@ -723,8 +1133,14 @@ server.tool(
     date: z.string().optional().describe("Transaction date. Defaults to today. Accepts 'today', 'yesterday', or YYYY-MM-DD"),
     memo: z.string().optional().describe("Optional memo/note for the transaction"),
     confirm_new_payee: z.boolean().optional().describe("Set to true to confirm creating a new payee that doesn't exist yet"),
+    subtransactions: z.array(z.object({
+      amount: z.number().describe("Amount in dollars (negative=outflow, positive=inflow)"),
+      category: z.string().optional().describe("Category name (fuzzy matched)"),
+      payee: z.string().optional().describe("Payee name (fuzzy matched, defaults to parent payee)"),
+      memo: z.string().optional().describe("Memo for this split line"),
+    })).optional().describe("Split into subtransactions. Amounts must sum to the parent amount."),
   },
-  async ({ amount, payee, category, account, date, memo, confirm_new_payee }) => {
+  async ({ amount, payee, category, account, date, memo, confirm_new_payee, subtransactions }) => {
     // Resolve account
     let accountId: string;
     if (account) {
@@ -785,6 +1201,63 @@ server.tool(
     // Parse date
     const transactionDate = date ? parseDate(date) : new Date().toISOString().split("T")[0];
 
+    // Handle split transactions
+    let resolvedSubtransactions: { amount: number; payee_id?: string; payee_name?: string; category_id?: string; memo?: string }[] | undefined;
+    if (subtransactions && subtransactions.length > 0) {
+      // Validate amounts sum to parent
+      const subTotal = subtransactions.reduce((sum, s) => sum + s.amount, 0);
+      const tolerance = 0.005;
+      if (Math.abs(subTotal - amount) > tolerance) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Subtransaction amounts must sum to the parent amount. Parent: $${amount.toFixed(2)}, subtransactions sum: $${subTotal.toFixed(2)}`,
+          }],
+          isError: true,
+        };
+      }
+
+      resolvedSubtransactions = [];
+      for (const sub of subtransactions) {
+        const resolved: { amount: number; payee_id?: string; payee_name?: string; category_id?: string; memo?: string } = {
+          amount: usdToMilliunits(sub.amount),
+        };
+
+        // Resolve subtransaction category
+        if (sub.category) {
+          const catResult = await client.findCategory(sub.category);
+          if ("error" in catResult) {
+            return { content: [{ type: "text" as const, text: `Subtransaction category error: ${catResult.error}` }], isError: true };
+          }
+          resolved.category_id = catResult.id;
+        }
+
+        // Resolve subtransaction payee (defaults to parent payee)
+        if (sub.payee) {
+          const payResult = client.findPayee(sub.payee);
+          if ("id" in payResult) {
+            resolved.payee_id = payResult.id;
+          } else if (payResult.matches.length > 0) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Subtransaction payee error: Multiple payees match "${sub.payee}": ${payResult.matches.map(p => p.name).join(", ")}`,
+              }],
+              isError: true,
+            };
+          } else {
+            resolved.payee_name = sub.payee;
+          }
+        }
+
+        if (sub.memo) resolved.memo = sub.memo;
+        resolvedSubtransactions.push(resolved);
+      }
+
+      // YNAB sets the parent category to "Split" automatically
+      categoryId = undefined;
+    }
+
     // Create transaction
     const transaction = await client.createTransaction({
       account_id: accountId,
@@ -795,20 +1268,27 @@ server.tool(
       category_id: categoryId,
       memo,
       cleared: "uncleared",
+      subtransactions: resolvedSubtransactions,
     });
 
-    return {
-      content: [{
-        type: "text",
-        text: `Transaction created successfully:
+    let confirmText = `Transaction created successfully:
 Date: ${transaction.date}
 Amount: ${formatUSD(transaction.amount)}
 Payee: ${transaction.payee_name}
 Category: ${transaction.category_name || "Uncategorized"}
 Account: ${transaction.account_name}
 ${transaction.memo ? `Memo: ${transaction.memo}` : ""}
-ID: ${transaction.id}`,
-      }],
+ID: ${transaction.id}`;
+
+    if (transaction.subtransactions && transaction.subtransactions.length > 0) {
+      confirmText += "\nSplit:";
+      for (const sub of transaction.subtransactions) {
+        confirmText += `\n  -> ${formatUSD(sub.amount)} | ${sub.category_name || "Uncategorized"}${sub.payee_name ? ` | ${sub.payee_name}` : ""}${sub.memo ? ` | "${sub.memo}"` : ""}`;
+      }
+    }
+
+    return {
+      content: [{ type: "text", text: confirmText }],
     };
   }
 );
